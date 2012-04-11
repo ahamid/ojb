@@ -142,7 +142,28 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
     with user implemented equals/hashCode methods of persistence capable objects
     (e.g. objects are equals but PK fields not)
     */
-    private List nowStoring = new IdentityArrayList();
+    private ThreadLocal<List> storeGraph = new ThreadLocal<List>();
+
+    // ensure a list to cache saved objects is initialized
+    // for the entire call call chain
+    private void doInStoreContext(Runnable r) {
+        List nowStoring = storeGraph.get();
+        boolean initialContext = nowStoring == null;
+        // initialize the list once at the bottom of the call chain
+        if (initialContext) {
+            nowStoring = new IdentityArrayList();
+            storeGraph.set(nowStoring);
+        }
+        try {
+            r.run();
+        } finally {
+            // if we have reached the entry point clear the threadlocal
+            if (initialContext) {
+                nowStoring.clear();
+                storeGraph.remove();
+            }
+        }
+    }
 
     /**
      * Lists for object registration during delete operations.
@@ -793,9 +814,11 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
      * Store an Object.
      * @see org.apache.ojb.broker.PersistenceBroker#store(Object)
      */
-    public void store(Object obj) throws PersistenceBrokerException
+    public void store(final Object in_obj) throws PersistenceBrokerException
     {
-        obj = extractObjectToStore(obj);
+        doInStoreContext(new Runnable() { public void run() {
+
+        Object obj = extractObjectToStore(in_obj);
         // only do something if obj != null
         if(obj == null) return;
 
@@ -816,6 +839,8 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
                 && !serviceBrokerHelper().doesExist(cld, oid, obj);
         }
         store(obj, oid, cld, insert);
+
+        }});
     }
 
     /**
@@ -850,16 +875,19 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
      * @param obj The object to store.
      * @param oid The {@link Identity} of the object to store.
      * @param cld The {@link org.apache.ojb.broker.metadata.ClassDescriptor} of the object.
-     * @param insert If <em>true</em> an insert operation will be performed, else update operation.
+     * @param in_insert If <em>true</em> an insert operation will be performed, else update operation.
      * @param ignoreReferences With this flag the automatic storing/linking
      * of references can be suppressed (independent of the used auto-update setting in metadata),
      * except {@link org.apache.ojb.broker.metadata.SuperReferenceDescriptor}
      * these kind of reference (descriptor) will always be performed. If <em>true</em>
      * all "normal" referenced objects will be ignored, only the specified object is handled.
      */
-    public void store(Object obj, Identity oid, ClassDescriptor cld,  boolean insert, boolean ignoreReferences)
+    public void store(final Object obj, final Identity oid, final ClassDescriptor cld,  final boolean in_insert, final boolean ignoreReferences)
     {
-        if(obj == null || nowStoring.contains(obj))
+        doInStoreContext(new Runnable() { public void run() {
+
+        boolean insert = in_insert;
+        if(obj == null || storeGraph.get().contains(obj))
         {
             return;
         }
@@ -907,13 +935,13 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
 
         try
         {
-            nowStoring.add(obj);
+            storeGraph.get().add(obj);
             storeToDb(obj, cld, oid, insert, ignoreReferences);
         }
         finally
         {
             // to optimize calls to DB don't remove already stored objects
-            nowStoring.remove(obj);
+            //storeGraph.get().remove(obj);
         }
 
 
@@ -938,6 +966,8 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
 
         // let the connection manager to execute batch
         connectionManager.executeBatchIfNecessary();
+
+        }});
     }
 
     /**
@@ -1844,9 +1874,11 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
      * track which objects have to be stored. If the object is an unmaterialized
      * proxy the method return immediately.
      */
-    public void store(Object obj, ObjectModification mod) throws PersistenceBrokerException
+    public void store(final Object in_obj, final ObjectModification mod) throws PersistenceBrokerException
     {
-        obj = extractObjectToStore(obj);
+        doInStoreContext(new Runnable() { public void run() {
+
+        Object obj = extractObjectToStore(in_obj);
         // null for unmaterialized Proxy
         if (obj == null)
         {
@@ -1874,6 +1906,8 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
             // just store 1:n and m:n associations
             storeCollections(obj, cld, mod.needsInsert());
         }
+
+        }});
     }
 
     /**
@@ -2196,7 +2230,10 @@ public class PersistenceBrokerImpl extends PersistenceBrokerAbstractImpl impleme
      */
     private void clearRegistrationLists()
     {
-        nowStoring.clear();
+        List nowStoring = storeGraph.get();
+        if (nowStoring != null) {
+            nowStoring.clear();
+        }
         objectCache.doLocalClear();
         deletedDuringTransaction.clear();
         /*
